@@ -1,12 +1,13 @@
 
+from flask import Flask, render_template, request, jsonify
 import requests
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import re
-from flask import Flask, render_template, request, jsonify
 
 app = Flask(__name__)
+WIB = ZoneInfo("Asia/Jakarta")
 
-# Data asli dari notebook Google Colab
 KECAMATAN_DATA = {
     "siantar barat": {"adm4": "12.72.01.1001", "lat": 2.9564, "lon": 99.0558},
     "siantar timur": {"adm4": "12.72.02.1001", "lat": 2.9612, "lon": 99.0811},
@@ -57,7 +58,7 @@ def get_today_bmkg_json(adm4_code, target_hour):
     }
 
     try:
-        res = requests.get(url, headers=headers, timeout=10)
+        res = requests.get(url, headers=headers, timeout=15)
         res.raise_for_status()
         data = res.json()
 
@@ -65,7 +66,7 @@ def get_today_bmkg_json(adm4_code, target_hour):
 
         if isinstance(data, list) and data:
             lokasi = data[0]
-            raw_cuaca = lokasi.get("cuaca", [])
+            raw_cuaca = lokasi.get("cuaca", []) if isinstance(lokasi, dict) else []
 
             if raw_cuaca and isinstance(raw_cuaca[0], list):
                 cuaca_list = raw_cuaca[0]
@@ -86,7 +87,7 @@ def get_today_bmkg_json(adm4_code, target_hour):
         if not cuaca_list:
             return "Data cuaca tidak ditemukan dalam respon BMKG."
 
-        best_item = None
+        best_item = cuaca_list[0]
         min_diff = 24
 
         for item in cuaca_list:
@@ -103,8 +104,8 @@ def get_today_bmkg_json(adm4_code, target_hour):
                     min_diff = diff
                     best_item = item
 
-        if best_item is None:
-            return "Data prakiraan cuaca tidak tersedia."
+        if not isinstance(best_item, dict):
+            return "Format data prakiraan BMKG tidak sesuai."
 
         return (
             f"Sumber: API Publik BMKG\n"
@@ -115,7 +116,7 @@ def get_today_bmkg_json(adm4_code, target_hour):
         )
 
     except Exception as e:
-        return f"Terjadi kesalahan saat mengambil data BMKG: {e}"
+        return f"Error BMKG API: {e}"
 
 
 def get_history_open_meteo_hourly(lat, lon, date_str, target_hour):
@@ -128,7 +129,7 @@ def get_history_open_meteo_hourly(lat, lon, date_str, target_hour):
     )
 
     try:
-        res = requests.get(url, timeout=10)
+        res = requests.get(url, timeout=15)
         res.raise_for_status()
 
         hourly = res.json().get("hourly", {})
@@ -137,11 +138,15 @@ def get_history_open_meteo_hourly(lat, lon, date_str, target_hour):
         if not times:
             return "Data cuaca historis tidak ditemukan."
 
-        target_idx = next(
-            (i for i, t in enumerate(times)
-             if t.endswith(f"T{target_hour:02d}:00")),
-            min(target_hour, len(times) - 1)
-        )
+        target_idx = -1
+
+        for idx, time_str in enumerate(times):
+            if time_str.endswith(f"T{target_hour:02d}:00"):
+                target_idx = idx
+                break
+
+        if target_idx == -1:
+            target_idx = min(target_hour, len(times) - 1)
 
         code = hourly["weather_code"][target_idx]
         temp = hourly["temperature_2m"][target_idx]
@@ -157,7 +162,7 @@ def get_history_open_meteo_hourly(lat, lon, date_str, target_hour):
         )
 
     except Exception as e:
-        return f"Terjadi kesalahan saat mengambil data historis: {e}"
+        return f"Error Historis: {e}"
 
 
 def process_query(user_input):
@@ -173,10 +178,10 @@ def process_query(user_input):
     if not matched_kec:
         return (
             "Mohon sebutkan nama kecamatan di Pematangsiantar. "
-            "Contoh: Siantar Barat, Siantar Timur, atau Marihat."
+            "Contoh: Siantar Barat, Marihat, atau Martoba."
         )
 
-    today = datetime.now()
+    today = datetime.now(WIB)
     target_hour = parse_hour(text)
 
     if target_hour is None:
@@ -197,7 +202,7 @@ def process_query(user_input):
             try:
                 dt = datetime.strptime(word, "%Y-%m-%d")
                 target_date = word
-                is_today = (dt.date() == today.date())
+                is_today = dt.date() == today.date()
                 break
             except ValueError:
                 continue
@@ -221,9 +226,8 @@ def process_query(user_input):
         )
 
     return (
-        f"Info Cuaca {matched_kec.title()}\n"
-        f"Tanggal: {target_date}\n"
-        f"Jam: {target_hour:02d}:00 WIB\n\n"
+        f"--- Info Cuaca {matched_kec.title()} "
+        f"({target_date} Jam {target_hour:02d}:00 WIB) ---\n"
         f"{details}"
     )
 
@@ -239,11 +243,12 @@ def chat():
     message = data.get("message", "").strip()
 
     if not message:
-        return jsonify({"reply": "Silakan ketik pertanyaan terlebih dahulu."})
+        return jsonify({"reply": "Silakan tulis pertanyaan terlebih dahulu."}), 400
 
-    response = process_query(message)
-    return jsonify({"reply": response})
+    reply = process_query(message)
+
+    return jsonify({"reply": reply})
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=True)
